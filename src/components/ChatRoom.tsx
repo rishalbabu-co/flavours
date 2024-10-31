@@ -1,90 +1,111 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Send, Video, SkipForward } from 'lucide-react';
+import { ArrowLeft, Send, Video, SkipForward, Users } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import Peer from 'simple-peer';
+import { User } from '../types/auth';
+import socket from '../services/socket';
+import MessageList from './chat/MessageList';
+import MessageInput from './chat/MessageInput';
+import ChatHeader from './chat/ChatHeader';
+import VideoChat from './chat/VideoChat';
 
 interface Message {
   id: string;
   text: string;
   sender: string;
+  username: string;
   timestamp: Date;
 }
 
 interface ChatRoomProps {
+  user: User;
   onBack: () => void;
 }
 
-export default function ChatRoom({ onBack }: ChatRoomProps) {
-  const [userId] = useState(uuidv4());
+export default function ChatRoom({ user, onBack }: ChatRoomProps) {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [inputMessage, setInputMessage] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [isSearching, setIsSearching] = useState(true);
   const [isVideoEnabled, setIsVideoEnabled] = useState(false);
+  const [peerUsername, setPeerUsername] = useState<string>('');
+  const [onlineUsers, setOnlineUsers] = useState(0);
 
   const peerRef = useRef<Peer.Instance | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const localVideoRef = useRef<HTMLVideoElement>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
-    if (isVideoEnabled) {
-      initializeMedia();
-    }
-    findStranger();
-    
+    socket.initializeConnection(user.id, user.username);
+    setOnlineUsers(socket.getUserCount());
+    findPeer();
+
+    socket.onUserCountUpdate((count) => {
+      setOnlineUsers(count);
+    });
+
     return () => {
       streamRef.current?.getTracks().forEach(track => track.stop());
       peerRef.current?.destroy();
+      socket.disconnect();
     };
-  }, [isVideoEnabled]);
+  }, [user.id, user.username]);
 
-  const initializeMedia = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      streamRef.current = stream;
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
+  useEffect(() => {
+    socket.onPeerFound((peerId, username) => {
+      setPeerUsername(username);
+      initializePeerConnection(peerId, true);
+    });
+
+    socket.onSignal((signal, from) => {
+      if (peerRef.current) {
+        peerRef.current.signal(signal);
+      } else {
+        initializePeerConnection(from, false);
+        peerRef.current?.signal(signal);
       }
-    } catch (err) {
-      console.error('Failed to get media devices:', err);
-      setIsVideoEnabled(false);
-    }
+    });
+
+    socket.onPeerDisconnected(() => handlePeerDisconnect());
+  }, []);
+
+  const findPeer = () => {
+    setIsSearching(true);
+    addSystemMessage("Looking for someone to chat with...");
+    socket.findPeer('one-on-one');
   };
 
-  const findStranger = () => {
-    setIsSearching(true);
-    setMessages([]);
-    
-    if (peerRef.current) {
-      peerRef.current.destroy();
+  const initializePeerConnection = async (peerId: string, initiator: boolean) => {
+    if (isVideoEnabled && !streamRef.current) {
+      try {
+        streamRef.current = await navigator.mediaDevices.getUserMedia({ 
+          video: true, 
+          audio: true 
+        });
+      } catch (err) {
+        console.error('Failed to get media devices:', err);
+        setIsVideoEnabled(false);
+      }
     }
 
     const peer = new Peer({
-      initiator: true,
+      initiator,
       trickle: false,
-      stream: streamRef.current,
+      stream: streamRef.current || undefined,
     });
 
     peer.on('signal', data => {
-      // In a real app, send this signal to a signaling server
-      console.log('Generated peer signal:', data);
+      socket.sendSignal(data, peerId);
     });
 
     peer.on('connect', () => {
       setIsConnected(true);
       setIsSearching(false);
-      setMessages(prev => [...prev, {
-        id: uuidv4(),
-        text: "Connected with a stranger! Say hi! 👋",
-        sender: 'system',
-        timestamp: new Date()
-      }]);
+      addSystemMessage(`Connected with ${peerUsername}! Say hi! 👋`);
     });
 
     peer.on('stream', stream => {
-      if (remoteVideoRef.current && isVideoEnabled) {
-        remoteVideoRef.current.srcObject = stream;
+      const remoteVideo = document.getElementById('remoteVideo') as HTMLVideoElement;
+      if (remoteVideo && isVideoEnabled) {
+        remoteVideo.srcObject = stream;
       }
     });
 
@@ -93,37 +114,47 @@ export default function ChatRoom({ onBack }: ChatRoomProps) {
       setMessages(prev => [...prev, message]);
     });
 
-    peer.on('close', () => {
-      setIsConnected(false);
-      setMessages(prev => [...prev, {
-        id: uuidv4(),
-        text: "Stranger has disconnected.",
-        sender: 'system',
-        timestamp: new Date()
-      }]);
-    });
-
     peerRef.current = peer;
   };
 
-  const sendMessage = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputMessage.trim() || !peerRef.current) return;
+  const handlePeerDisconnect = () => {
+    setIsConnected(false);
+    setPeerUsername('');
+    addSystemMessage("Stranger has disconnected.");
+    findPeer();
+  };
+
+  const addSystemMessage = (text: string) => {
+    setMessages(prev => [...prev, {
+      id: uuidv4(),
+      text,
+      sender: 'system',
+      username: 'System',
+      timestamp: new Date()
+    }]);
+  };
+
+  const handleSendMessage = (text: string) => {
+    if (!peerRef.current) return;
 
     const message = {
       id: uuidv4(),
-      text: inputMessage,
-      sender: userId,
+      text,
+      sender: user.id,
+      username: user.username,
       timestamp: new Date()
     };
 
     peerRef.current.send(JSON.stringify(message));
     setMessages(prev => [...prev, message]);
-    setInputMessage('');
   };
 
-  const skipStranger = () => {
-    findStranger();
+  const handleSkip = () => {
+    peerRef.current?.destroy();
+    setIsSearching(true);
+    setPeerUsername('');
+    setMessages([]);
+    findPeer();
   };
 
   const toggleVideo = () => {
@@ -142,6 +173,10 @@ export default function ChatRoom({ onBack }: ChatRoomProps) {
             Back
           </button>
           <div className="flex items-center space-x-4">
+            <div className="flex items-center space-x-2 text-gray-600">
+              <Users className="w-5 h-5" />
+              <span>{onlineUsers} online</span>
+            </div>
             <button
               onClick={toggleVideo}
               className={`p-2 rounded-full ${
@@ -151,7 +186,7 @@ export default function ChatRoom({ onBack }: ChatRoomProps) {
               <Video className="w-5 h-5" />
             </button>
             <button
-              onClick={skipStranger}
+              onClick={handleSkip}
               className="flex items-center px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600"
             >
               <SkipForward className="w-5 h-5 mr-2" />
@@ -161,75 +196,33 @@ export default function ChatRoom({ onBack }: ChatRoomProps) {
         </div>
 
         {isVideoEnabled && (
-          <div className="grid grid-cols-2 gap-4 p-4 bg-gray-900">
-            <div className="aspect-video bg-black rounded-lg overflow-hidden">
-              <video
-                ref={localVideoRef}
-                autoPlay
-                muted
-                playsInline
-                className="w-full h-full object-cover"
-              />
-            </div>
-            <div className="aspect-video bg-black rounded-lg overflow-hidden">
-              <video
-                ref={remoteVideoRef}
-                autoPlay
-                playsInline
-                className="w-full h-full object-cover"
-              />
-            </div>
-          </div>
+          <VideoChat
+            localStream={streamRef.current}
+            remoteStream={null}
+          />
         )}
 
-        <div className="h-[calc(100vh-20rem)] overflow-y-auto p-4 space-y-4">
-          {isSearching && (
-            <div className="flex items-center justify-center h-full">
+        <div className="h-[calc(100vh-20rem)] flex flex-col">
+          {isSearching ? (
+            <div className="flex items-center justify-center flex-1">
               <div className="text-center">
                 <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500 mx-auto mb-4"></div>
-                <p className="text-gray-600">Looking for a stranger...</p>
+                <p className="text-gray-600">Looking for someone to chat with...</p>
+                <p className="text-sm text-gray-500 mt-2">{onlineUsers - 1} potential matches</p>
               </div>
             </div>
-          )}
-          
-          {messages.map(message => (
-            <div
-              key={message.id}
-              className={`max-w-[80%] ${
-                message.sender === userId
-                  ? 'ml-auto bg-purple-500 text-white rounded-l-lg rounded-tr-lg'
-                  : message.sender === 'system'
-                  ? 'mx-auto bg-gray-200 text-gray-800 rounded-lg'
-                  : 'bg-gray-100 text-gray-800 rounded-r-lg rounded-tl-lg'
-              } p-3`}
-            >
-              <p>{message.text}</p>
-              <span className="text-xs opacity-75">
-                {new Date(message.timestamp).toLocaleTimeString()}
-              </span>
-            </div>
-          ))}
-        </div>
-
-        <form onSubmit={sendMessage} className="p-4 border-t">
-          <div className="flex space-x-4">
-            <input
-              type="text"
-              value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
-              placeholder="Type a message..."
-              className="flex-1 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
-              disabled={!isConnected}
+          ) : (
+            <MessageList
+              messages={messages}
+              currentUserId={user.id}
             />
-            <button
-              type="submit"
-              disabled={!isConnected}
-              className="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Send className="w-5 h-5" />
-            </button>
-          </div>
-        </form>
+          )}
+
+          <MessageInput
+            onSendMessage={handleSendMessage}
+            disabled={!isConnected}
+          />
+        </div>
       </div>
     </div>
   );
