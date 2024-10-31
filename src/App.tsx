@@ -6,6 +6,7 @@ import MatchingScreen from './components/MatchingScreen';
 import { User } from './types/auth';
 import authService from './services/authService';
 import { MessageSquare, Users, Heart } from 'lucide-react';
+import AdUnit from './components/ads/AdUnit';
 
 type Feature = 'one-on-one' | 'group' | 'matching' | null;
 
@@ -35,7 +36,18 @@ function App() {
   };
 
   if (!user) {
-    return <AuthForm onAuthSuccess={handleAuthSuccess} />;
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-100 to-indigo-100 p-4">
+        <AuthForm onAuthSuccess={handleAuthSuccess} />
+        <div className="max-w-md mx-auto mt-8">
+          <AdUnit 
+            adKey="auth-page-ad"
+            slot="1234567890"
+            layout="in-article"
+          />
+        </div>
+      </div>
+    );
   }
 
   if (selectedFeature === 'one-on-one') {
@@ -64,6 +76,13 @@ function App() {
             Logout
           </button>
         </div>
+
+        <AdUnit 
+          adKey="home-top-ad"
+          slot="2345678901"
+          format="rectangle"
+          className="mb-4"
+        />
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <button
@@ -99,6 +118,13 @@ function App() {
             </p>
           </button>
         </div>
+
+        <AdUnit 
+          adKey="home-bottom-ad"
+          slot="3456789012"
+          layout="in-article"
+          className="mt-8"
+        />
       </div>
     </div>
   );

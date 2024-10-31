@@ -8,14 +8,8 @@ import MessageList from './chat/MessageList';
 import MessageInput from './chat/MessageInput';
 import ChatHeader from './chat/ChatHeader';
 import VideoChat from './chat/VideoChat';
-
-interface Message {
-  id: string;
-  text: string;
-  sender: string;
-  username: string;
-  timestamp: Date;
-}
+import SearchMessages from './chat/SearchMessages';
+import { Message } from '../types/chat';
 
 interface ChatRoomProps {
   user: User;
@@ -29,9 +23,11 @@ export default function ChatRoom({ user, onBack }: ChatRoomProps) {
   const [isVideoEnabled, setIsVideoEnabled] = useState(false);
   const [peerUsername, setPeerUsername] = useState<string>('');
   const [onlineUsers, setOnlineUsers] = useState(0);
+  const [typingUsers, setTypingUsers] = useState<string[]>([]);
 
   const peerRef = useRef<Peer.Instance | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const messageListRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     socket.initializeConnection(user.id, user.username);
@@ -111,10 +107,26 @@ export default function ChatRoom({ user, onBack }: ChatRoomProps) {
 
     peer.on('data', data => {
       const message = JSON.parse(data.toString());
-      setMessages(prev => [...prev, message]);
+      if (message.type === 'typing') {
+        handlePeerTyping(message.username, message.isTyping);
+      } else {
+        setMessages(prev => [...prev, message]);
+      }
     });
 
     peerRef.current = peer;
+  };
+
+  const handlePeerTyping = (username: string, isTyping: boolean) => {
+    setTypingUsers(prev => {
+      if (isTyping && !prev.includes(username)) {
+        return [...prev, username];
+      }
+      if (!isTyping) {
+        return prev.filter(u => u !== username);
+      }
+      return prev;
+    });
   };
 
   const handlePeerDisconnect = () => {
@@ -130,70 +142,149 @@ export default function ChatRoom({ user, onBack }: ChatRoomProps) {
       text,
       sender: 'system',
       username: 'System',
-      timestamp: new Date()
+      timestamp: new Date(),
+      type: 'system'
     }]);
   };
 
   const handleSendMessage = (text: string) => {
     if (!peerRef.current) return;
 
-    const message = {
+    const message: Message = {
       id: uuidv4(),
       text,
       sender: user.id,
       username: user.username,
-      timestamp: new Date()
+      timestamp: new Date(),
+      type: 'text',
+      readBy: []
     };
 
     peerRef.current.send(JSON.stringify(message));
     setMessages(prev => [...prev, message]);
   };
 
-  const handleSkip = () => {
-    peerRef.current?.destroy();
-    setIsSearching(true);
-    setPeerUsername('');
-    setMessages([]);
-    findPeer();
+  const handleSendFile = async (file: File) => {
+    if (!peerRef.current) return;
+
+    const isImage = file.type.startsWith('image/');
+    const fileReader = new FileReader();
+
+    fileReader.onload = async () => {
+      const message: Message = {
+        id: uuidv4(),
+        text: `Sent ${isImage ? 'an image' : 'a file'}: ${file.name}`,
+        sender: user.id,
+        username: user.username,
+        timestamp: new Date(),
+        type: isImage ? 'image' : 'file',
+        fileUrl: fileReader.result as string,
+        fileName: file.name,
+        fileSize: file.size,
+        readBy: []
+      };
+
+      peerRef.current?.send(JSON.stringify(message));
+      setMessages(prev => [...prev, message]);
+    };
+
+    fileReader.readAsDataURL(file);
   };
 
-  const toggleVideo = () => {
-    setIsVideoEnabled(!isVideoEnabled);
+  const handleSendVoice = async (blob: Blob) => {
+    if (!peerRef.current) return;
+
+    const fileReader = new FileReader();
+
+    fileReader.onload = async () => {
+      const message: Message = {
+        id: uuidv4(),
+        text: 'Sent a voice message',
+        sender: user.id,
+        username: user.username,
+        timestamp: new Date(),
+        type: 'voice',
+        fileUrl: fileReader.result as string,
+        fileDuration: 0, // You can calculate this if needed
+        readBy: []
+      };
+
+      peerRef.current?.send(JSON.stringify(message));
+      setMessages(prev => [...prev, message]);
+    };
+
+    fileReader.readAsDataURL(blob);
+  };
+
+  const handleTypingStart = () => {
+    if (!peerRef.current) return;
+    peerRef.current.send(JSON.stringify({
+      type: 'typing',
+      username: user.username,
+      isTyping: true
+    }));
+  };
+
+  const handleTypingStop = () => {
+    if (!peerRef.current) return;
+    peerRef.current.send(JSON.stringify({
+      type: 'typing',
+      username: user.username,
+      isTyping: false
+    }));
+  };
+
+  const handleReaction = (messageId: string, emoji: string) => {
+    if (!peerRef.current) return;
+
+    setMessages(prev => prev.map(message => {
+      if (message.id === messageId) {
+        const reactions = message.reactions || [];
+        const existingReaction = reactions.find(r => r.emoji === emoji);
+
+        if (existingReaction) {
+          if (!existingReaction.users.includes(user.id)) {
+            existingReaction.users.push(user.id);
+          }
+          return { ...message, reactions };
+        }
+
+        return {
+          ...message,
+          reactions: [...reactions, { emoji, users: [user.id] }]
+        };
+      }
+      return message;
+    }));
+
+    peerRef.current.send(JSON.stringify({
+      type: 'reaction',
+      messageId,
+      emoji,
+      userId: user.id
+    }));
+  };
+
+  const scrollToMessage = (messageId: string) => {
+    const messageElement = document.getElementById(`message-${messageId}`);
+    if (messageElement) {
+      messageElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      messageElement.classList.add('highlight');
+      setTimeout(() => messageElement.classList.remove('highlight'), 2000);
+    }
   };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-100 to-indigo-100 p-4">
       <div className="max-w-4xl mx-auto bg-white rounded-lg shadow-lg overflow-hidden">
-        <div className="p-4 bg-gray-50 border-b flex items-center justify-between">
-          <button
-            onClick={onBack}
-            className="flex items-center text-gray-600 hover:text-gray-900"
-          >
-            <ArrowLeft className="w-5 h-5 mr-2" />
-            Back
-          </button>
-          <div className="flex items-center space-x-4">
-            <div className="flex items-center space-x-2 text-gray-600">
-              <Users className="w-5 h-5" />
-              <span>{onlineUsers} online</span>
-            </div>
-            <button
-              onClick={toggleVideo}
-              className={`p-2 rounded-full ${
-                isVideoEnabled ? 'bg-purple-500 text-white' : 'bg-gray-200 text-gray-600'
-              }`}
-            >
-              <Video className="w-5 h-5" />
-            </button>
-            <button
-              onClick={handleSkip}
-              className="flex items-center px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600"
-            >
-              <SkipForward className="w-5 h-5 mr-2" />
-              Skip
-            </button>
-          </div>
-        </div>
+        <ChatHeader
+          onBack={onBack}
+          onSkip={handlePeerDisconnect}
+          onToggleVideo={() => setIsVideoEnabled(!isVideoEnabled)}
+          isVideoEnabled={isVideoEnabled}
+          showVideoToggle={true}
+          onlineCount={onlineUsers}
+        />
 
         {isVideoEnabled && (
           <VideoChat
@@ -202,7 +293,12 @@ export default function ChatRoom({ user, onBack }: ChatRoomProps) {
           />
         )}
 
-        <div className="h-[calc(100vh-20rem)] flex flex-col">
+        <div className="h-[calc(100vh-20rem)] flex flex-col relative">
+          <SearchMessages
+            messages={messages}
+            onResultClick={scrollToMessage}
+          />
+
           {isSearching ? (
             <div className="flex items-center justify-center flex-1">
               <div className="text-center">
@@ -215,11 +311,17 @@ export default function ChatRoom({ user, onBack }: ChatRoomProps) {
             <MessageList
               messages={messages}
               currentUserId={user.id}
+              typingUsers={typingUsers}
+              onReaction={handleReaction}
             />
           )}
 
           <MessageInput
             onSendMessage={handleSendMessage}
+            onSendFile={handleSendFile}
+            onSendVoice={handleSendVoice}
+            onTypingStart={handleTypingStart}
+            onTypingStop={handleTypingStop}
             disabled={!isConnected}
           />
         </div>
